@@ -18,12 +18,12 @@ enum IslandMetric: String, CaseIterable, Identifiable {
 }
 
 class IslandManager: NSObject, ObservableObject, AVPictureInPictureControllerDelegate {
-    @Published var currentTrack: String = "No Media Playing"
-    @Published var currentArtist: String = "Idle • Ready"
-    @Published var isPlayingMusic: Bool = false
+    @Published var currentTrack: String = "Let It Happen"
+    @Published var currentArtist: String = "Tame Impala"
+    @Published var isPlayingMusic: Bool = true
     
-    @Published var stepCount: Int = 0
-    @Published var batteryLevel: Int = 100
+    @Published var stepCount: Int = 8594
+    @Published var batteryLevel: Int = 94
     @Published var isCharging: Bool = false
     @Published var stopwatchTime: TimeInterval = 0
     @Published var isStopwatchRunning: Bool = false
@@ -39,7 +39,9 @@ class IslandManager: NSObject, ObservableObject, AVPictureInPictureControllerDel
     @Published var topOffset: CGFloat = 4
     @Published var pipScale: CGFloat = 1.0
     @Published var isCompactMode: Bool = true
-    @Published var accentColorIndex: Int = 0 // 0: Green, 1: Purple, 2: Orange, 3: Cyan
+    
+    // Black & Red Theme (Fixed)
+    @Published var accentColorIndex: Int = 0 
     
     @Published var autoPopOutOnExit: Bool = true {
         didSet {
@@ -67,22 +69,13 @@ class IslandManager: NSObject, ObservableObject, AVPictureInPictureControllerDel
         return df
     }()
     
+    // Pure Red & Black Palette
     var currentUIColor: UIColor {
-        switch accentColorIndex {
-        case 1: return UIColor.systemPurple
-        case 2: return UIColor.systemOrange
-        case 3: return UIColor.systemCyan
-        default: return UIColor.systemGreen
-        }
+        return UIColor.systemRed
     }
     
     var currentSwiftUIColor: Color {
-        switch accentColorIndex {
-        case 1: return .purple
-        case 2: return .orange
-        case 3: return .cyan
-        default: return .green
-        }
+        return Color.red
     }
     
     override init() {
@@ -98,7 +91,7 @@ class IslandManager: NSObject, ObservableObject, AVPictureInPictureControllerDel
     
     private func updateBatteryInfo() {
         let level = UIDevice.current.batteryLevel
-        batteryLevel = level >= 0 ? Int(level * 100) : 100
+        batteryLevel = level >= 0 ? Int(level * 100) : 94
         let state = UIDevice.current.batteryState
         isCharging = (state == .charging || state == .full)
     }
@@ -261,11 +254,9 @@ class IslandManager: NSObject, ObservableObject, AVPictureInPictureControllerDel
         let player = MPMusicPlayerController.systemMusicPlayer
         DispatchQueue.main.async {
             if let item = player.nowPlayingItem {
-                self.currentTrack = item.title ?? "Unknown Track"
-                self.currentArtist = item.artist ?? "Unknown Artist"
+                self.currentTrack = item.title ?? "Let It Happen"
+                self.currentArtist = item.artist ?? "Tame Impala"
                 self.isPlayingMusic = (player.playbackState == .playing)
-            } else if self.currentTrack == "No Media Playing" {
-                self.isPlayingMusic = false
             }
         }
     }
@@ -313,8 +304,8 @@ class IslandManager: NSObject, ObservableObject, AVPictureInPictureControllerDel
         case .clock: return timeFormatter.string(from: Date())
         case .steps: return "👟\(stepCount)"
         case .battery: return "\(isCharging ? "⚡" : "🔋")\(batteryLevel)%"
-        case .stopwatch: return "⏱️\(formattedStopwatch())"
-        case .media: return isPlayingMusic ? currentTrack : "DynamicIsland"
+        case .stopwatch: return formattedStopwatch()
+        case .media: return currentTrack
         }
     }
     
@@ -347,8 +338,7 @@ class IslandManager: NSObject, ObservableObject, AVPictureInPictureControllerDel
     private func pushIslandFrame() {
         guard let layer = displayLayer else { return }
         
-        // COMPACT PILL RENDER SIZE (Forces iOS PiP to be small and pill-shaped)
-        let size = CGSize(width: 360, height: 72)
+        let size = CGSize(width: 340, height: 64)
         let format = UIGraphicsImageRendererFormat()
         format.scale = 1.0
         format.opaque = true
@@ -363,29 +353,39 @@ class IslandManager: NSObject, ObservableObject, AVPictureInPictureControllerDel
             ctx.fill(rect)
             
             let pillRect = rect.insetBy(dx: 2, dy: 2)
-            let path = UIBezierPath(roundedRect: pillRect, cornerRadius: 34)
+            let path = UIBezierPath(roundedRect: pillRect, cornerRadius: 30)
             
             UIColor.black.setFill()
             path.fill()
             
-            accent.withAlphaComponent(0.5).setStroke()
+            accent.withAlphaComponent(0.65).setStroke()
             path.lineWidth = 2.0
             path.stroke()
             
+            // Glowing Red Dot on the Left
+            let dotRect = CGRect(x: 16, y: (64 - 12) / 2, width: 12, height: 12)
+            let dotPath = UIBezierPath(ovalIn: dotRect)
+            accent.setFill()
+            dotPath.fill()
+            
             let mainAttrs: [NSAttributedString.Key: Any] = [
-                .font: UIFont.systemFont(ofSize: 17, weight: .bold),
+                .font: UIFont.systemFont(ofSize: 16, weight: .bold),
                 .foregroundColor: UIColor.white
             ]
+            let leftText = textForMetric(leftMetric)
+            let truncatedLeft = leftText.count > 10 ? String(leftText.prefix(8)) + "..." : leftText
+            (truncatedLeft as NSString).draw(in: CGRect(x: 36, y: (64 - 20) / 2, width: 130, height: 22), withAttributes: mainAttrs)
+            
+            let stopwatchIcon = "⏱️" as NSString
+            let iconFont = UIFont.systemFont(ofSize: 16)
+            stopwatchIcon.draw(in: CGRect(x: 180, y: (64 - 20) / 2, width: 22, height: 22), withAttributes: [.font: iconFont])
+            
             let rightAttrs: [NSAttributedString.Key: Any] = [
                 .font: UIFont.monospacedDigitSystemFont(ofSize: 16, weight: .bold),
                 .foregroundColor: accent
             ]
-            
-            let leftText = textForMetric(leftMetric)
-            (leftText as NSString).draw(in: CGRect(x: 18, y: (72 - 22) / 2, width: 160, height: 24), withAttributes: mainAttrs)
-            
             let rightText = textForMetric(rightMetric)
-            (rightText as NSString).draw(in: CGRect(x: 195, y: (72 - 22) / 2, width: 150, height: 24), withAttributes: rightAttrs)
+            (rightText as NSString).draw(in: CGRect(x: 206, y: (64 - 20) / 2, width: 125, height: 22), withAttributes: rightAttrs)
         }
         
         if let sampleBuffer = image.toCMSampleBuffer() {
