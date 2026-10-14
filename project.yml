@@ -18,9 +18,13 @@ targets:
     type: application
     platform: iOS
     sources:
-      - DynamicIsland
+      - path: .
+        excludes:
+          - .github
+          - build_output
+          - Payload
     info:
-      path: DynamicIsland/Info.plist
+      path: Info.plist
       properties:
         CFBundleDisplayName: DynamicIsland
         UILaunchScreen: {}
