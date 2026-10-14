@@ -16,7 +16,13 @@ class IslandManager: NSObject, ObservableObject, AVPictureInPictureControllerDel
     @Published var stopwatchTime: TimeInterval = 0
     @Published var isStopwatchRunning: Bool = false
     @Published var isPiPActive: Bool = false
-    @Published var autoPopOutOnExit: Bool = true
+    @Published var autoPopOutOnExit: Bool = true {
+        didSet {
+            if #available(iOS 14.2, *) {
+                pipController?.canStartPictureInPictureAutomaticallyFromInline = autoPopOutOnExit
+            }
+        }
+    }
     
     private let pedometer = CMPedometer()
     private var stopwatchStartDate: Date?
@@ -26,7 +32,7 @@ class IslandManager: NSObject, ObservableObject, AVPictureInPictureControllerDel
     private var backgroundTaskID: UIBackgroundTaskIdentifier = .invalid
     private var renderSourceTimer: DispatchSourceTimer?
     
-    let sampleBufferDisplayLayer = AVSampleBufferDisplayLayer()
+    private weak var displayLayer: AVSampleBufferDisplayLayer?
     private var pipController: AVPictureInPictureController?
     
     override init() {
@@ -34,14 +40,14 @@ class IslandManager: NSObject, ObservableObject, AVPictureInPictureControllerDel
         setupContinuousBackgroundAudio()
         startStepTracking()
         setupNowPlayingObserver()
-        setupPiP()
         startHighPriorityFrameRenderer()
     }
     
     private func setupContinuousBackgroundAudio() {
         do {
             let session = AVAudioSession.sharedInstance()
-            try session.setCategory(.playback, mode: .default, options: [.mixWithOthers])
+            // CRITICAL FOR PIP: Mode MUST be .moviePlayback or iOS blocks out-of-app PiP!
+            try session.setCategory(.playback, mode: .moviePlayback, options: [.mixWithOthers])
             try session.setActive(true)
             
             let wavData = Self.makeSilentWavData()
@@ -55,7 +61,49 @@ class IslandManager: NSObject, ObservableObject, AVPictureInPictureControllerDel
         }
     }
     
+    func attachDisplayLayer(_ layer: AVSampleBufferDisplayLayer) {
+        guard self.displayLayer !== layer else { return }
+        self.displayLayer = layer
+        layer.videoGravity = .resizeAspect
+        
+        // CRITICAL FOR PIP: AVSampleBufferDisplayLayer requires an active running CMTimebase
+        var timebase: CMTimebase?
+        CMTimebaseCreateWithSourceClock(
+            allocator: nil,
+            sourceClock: CMClockGetHostTimeClock(),
+            timebaseOut: &timebase
+        )
+        if let tb = timebase {
+            CMTimebaseSetTime(tb, time: CMClockGetTime(CMClockGetHostTimeClock()))
+            CMTimebaseSetRate(tb, rate: 1.0)
+            layer.controlTimebase = tb
+        }
+        
+        pushIslandFrame()
+        
+        guard AVPictureInPictureController.isPictureInPictureSupported() else { return }
+        let contentSource = AVPictureInPictureController.ContentSource(
+            sampleBufferDisplayLayer: layer,
+            playbackDelegate: self
+        )
+        let pip = AVPictureInPictureController(contentSource: contentSource)
+        pip.delegate = self
+        if #available(iOS 14.2, *) {
+            pip.canStartPictureInPictureAutomaticallyFromInline = autoPopOutOnExit
+        }
+        self.pipController = pip
+        
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { [weak self] in
+            self?.pushIslandFrame()
+            self?.pipController?.invalidatePlaybackState()
+        }
+    }
+    
     func ensureBackgroundExecution() {
+        do {
+            try AVAudioSession.sharedInstance().setActive(true)
+        } catch {}
+        
         if silentAudioPlayer?.isPlaying == false {
             silentAudioPlayer?.play()
         }
@@ -66,9 +114,6 @@ class IslandManager: NSObject, ObservableObject, AVPictureInPictureControllerDel
                 }
                 self?.backgroundTaskID = .invalid
             }
-        }
-        if autoPopOutOnExit, let pip = pipController, !pip.isPictureInPictureActive {
-            pip.startPictureInPicture()
         }
     }
     
@@ -167,23 +212,6 @@ class IslandManager: NSObject, ObservableObject, AVPictureInPictureControllerDel
         return String(format: "%02d:%02d.%d", minutes, seconds, tenths)
     }
     
-    func setupPiP() {
-        guard AVPictureInPictureController.isPictureInPictureSupported() else { return }
-        sampleBufferDisplayLayer.videoGravity = .resizeAspect
-        pushIslandFrame()
-        
-        let contentSource = AVPictureInPictureController.ContentSource(
-            sampleBufferDisplayLayer: sampleBufferDisplayLayer,
-            playbackDelegate: self
-        )
-        pipController = AVPictureInPictureController(contentSource: contentSource)
-        pipController?.delegate = self
-        if #available(iOS 14.2, *) {
-            pipController?.canStartPictureInPictureAutomaticallyFromInline = true
-        }
-        pipController?.requiresLinearPlayback = true
-    }
-    
     func togglePiP() {
         guard let pip = pipController else { return }
         if pip.isPictureInPictureActive {
@@ -195,7 +223,7 @@ class IslandManager: NSObject, ObservableObject, AVPictureInPictureControllerDel
     
     func startHighPriorityFrameRenderer() {
         let timer = DispatchSource.makeTimerSource(queue: DispatchQueue.main)
-        timer.schedule(deadline: .now(), repeating: .milliseconds(150))
+        timer.schedule(deadline: .now(), repeating: .milliseconds(200))
         timer.setEventHandler { [weak self] in
             guard let self = self else { return }
             if self.isStopwatchRunning, let start = self.stopwatchStartDate {
@@ -208,6 +236,7 @@ class IslandManager: NSObject, ObservableObject, AVPictureInPictureControllerDel
     }
     
     private func pushIslandFrame() {
+        guard let layer = displayLayer else { return }
         let size = CGSize(width: 660, height: 120)
         let renderer = UIGraphicsImageRenderer(size: size)
         
@@ -254,10 +283,10 @@ class IslandManager: NSObject, ObservableObject, AVPictureInPictureControllerDel
         }
         
         if let sampleBuffer = image.toCMSampleBuffer() {
-            if sampleBufferDisplayLayer.status == .failed {
-                sampleBufferDisplayLayer.flush()
+            if layer.status == .failed {
+                layer.flush()
             }
-            sampleBufferDisplayLayer.enqueue(sampleBuffer)
+            layer.enqueue(sampleBuffer)
         }
     }
     
@@ -274,11 +303,12 @@ extension IslandManager: AVPictureInPictureSampleBufferPlaybackDelegate {
     func pictureInPictureController(_ pictureInPictureController: AVPictureInPictureController, setPlaying playing: Bool) {
         DispatchQueue.main.async {
             self.toggleStopwatch()
+            pictureInPictureController.invalidatePlaybackState()
         }
     }
     
     func pictureInPictureControllerTimeRangeForPlayback(_ pictureInPictureController: AVPictureInPictureController) -> CMTimeRange {
-        return CMTimeRange(start: .negativeInfinity, duration: .positiveInfinity)
+        return CMTimeRange(start: .zero, duration: CMTime(seconds: 86400 * 365, preferredTimescale: 600))
     }
     
     func pictureInPictureControllerIsPlaybackPaused(_ pictureInPictureController: AVPictureInPictureController) -> Bool {
@@ -342,10 +372,11 @@ extension UIImage {
         )
         guard let formatDesc = formatDescription else { return nil }
         
+        let now = CMClockGetTime(CMClockGetHostTimeClock())
         var timingInfo = CMSampleTimingInfo(
-            duration: CMTime(value: 1, timescale: 10),
-            presentationTimeStamp: CMClockGetTime(CMClockGetHostTimeClock()),
-            decodeTimeStamp: CMTime.invalid
+            duration: CMTime(value: 1, timescale: 5),
+            presentationTimeStamp: now,
+            decodeTimeStamp: .invalid
         )
         
         var sampleBuffer: CMSampleBuffer?
@@ -356,6 +387,16 @@ extension UIImage {
             sampleTiming: &timingInfo,
             sampleBufferOut: &sampleBuffer
         )
+        
+        if let sb = sampleBuffer, let attachments = CMSampleBufferGetSampleAttachmentsArray(sb, createIfNecessary: true) {
+            let dict = unsafeBitCast(CFArrayGetValueAtIndex(attachments, 0), to: CFMutableDictionary.self)
+            CFDictionarySetValue(
+                dict,
+                Unmanaged.passUnretained(kCMSampleAttachmentKey_DisplayImmediately).toOpaque(),
+                Unmanaged.passUnretained(kCFBooleanTrue).toOpaque()
+            )
+        }
+        
         return sampleBuffer
     }
 }
