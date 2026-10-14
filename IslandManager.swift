@@ -29,14 +29,14 @@ class IslandManager: NSObject, ObservableObject, AVPictureInPictureControllerDel
     @Published var isStopwatchRunning: Bool = false
     @Published var isPiPActive: Bool = false
     
-    // Customizable Metrics (User Choice)
+    // Customizable Metrics
     @Published var leftMetric: IslandMetric = .media
     @Published var rightMetric: IslandMetric = .stopwatch
     
     // Notch Customization Sliders
-    @Published var pillWidth: CGFloat = 210
-    @Published var pillHeight: CGFloat = 36
-    @Published var topOffset: CGFloat = 0
+    @Published var pillWidth: CGFloat = 165
+    @Published var pillHeight: CGFloat = 34
+    @Published var topOffset: CGFloat = 4
     @Published var pipScale: CGFloat = 1.0
     @Published var isCompactMode: Bool = true
     @Published var accentColorIndex: Int = 0 // 0: Green, 1: Purple, 2: Orange, 3: Cyan
@@ -311,10 +311,10 @@ class IslandManager: NSObject, ObservableObject, AVPictureInPictureControllerDel
     func textForMetric(_ metric: IslandMetric) -> String {
         switch metric {
         case .clock: return timeFormatter.string(from: Date())
-        case .steps: return "👟 \(stepCount)"
-        case .battery: return "\(isCharging ? "⚡" : "🔋") \(batteryLevel)%"
-        case .stopwatch: return "⏱️ \(formattedStopwatch())"
-        case .media: return isPlayingMusic ? currentTrack : "No Media"
+        case .steps: return "👟\(stepCount)"
+        case .battery: return "\(isCharging ? "⚡" : "🔋")\(batteryLevel)%"
+        case .stopwatch: return "⏱️\(formattedStopwatch())"
+        case .media: return isPlayingMusic ? currentTrack : "DynamicIsland"
         }
     }
     
@@ -347,10 +347,8 @@ class IslandManager: NSObject, ObservableObject, AVPictureInPictureControllerDel
     private func pushIslandFrame() {
         guard let layer = displayLayer else { return }
         
-        let baseW: CGFloat = isCompactMode ? 420 : 520
-        let baseH: CGFloat = isCompactMode ? 80 : 96
-        let size = CGSize(width: baseW, height: baseH)
-        
+        // COMPACT PILL RENDER SIZE (Forces iOS PiP to be small and pill-shaped)
+        let size = CGSize(width: 360, height: 72)
         let format = UIGraphicsImageRendererFormat()
         format.scale = 1.0
         format.opaque = true
@@ -364,74 +362,30 @@ class IslandManager: NSObject, ObservableObject, AVPictureInPictureControllerDel
             UIColor.black.setFill()
             ctx.fill(rect)
             
-            let pad: CGFloat = 3
-            let pillRect = rect.insetBy(dx: pad, dy: pad)
-            let path = UIBezierPath(roundedRect: pillRect, cornerRadius: (baseH - pad * 2) / 2)
+            let pillRect = rect.insetBy(dx: 2, dy: 2)
+            let path = UIBezierPath(roundedRect: pillRect, cornerRadius: 34)
             
-            UIColor(white: 0.04, alpha: 1.0).setFill()
+            UIColor.black.setFill()
             path.fill()
             
-            accent.withAlphaComponent(0.45).setStroke()
+            accent.withAlphaComponent(0.5).setStroke()
             path.lineWidth = 2.0
             path.stroke()
             
-            let badgeSize: CGFloat = baseH - 28
-            let badgeRect = CGRect(x: 16, y: (baseH - badgeSize) / 2, width: badgeSize, height: badgeSize)
-            let badgePath = UIBezierPath(ovalIn: badgeRect)
-            accent.withAlphaComponent(0.2).setFill()
-            badgePath.fill()
+            let mainAttrs: [NSAttributedString.Key: Any] = [
+                .font: UIFont.systemFont(ofSize: 17, weight: .bold),
+                .foregroundColor: UIColor.white
+            ]
+            let rightAttrs: [NSAttributedString.Key: Any] = [
+                .font: UIFont.monospacedDigitSystemFont(ofSize: 16, weight: .bold),
+                .foregroundColor: accent
+            ]
             
-            let iconStr = (isPlayingMusic ? "🎵" : "✨") as NSString
-            let iconFont = UIFont.systemFont(ofSize: badgeSize * 0.5)
-            iconStr.draw(in: CGRect(x: badgeRect.minX + badgeSize * 0.22, y: badgeRect.minY + badgeSize * 0.18, width: badgeSize, height: badgeSize), withAttributes: [.font: iconFont])
+            let leftText = textForMetric(leftMetric)
+            (leftText as NSString).draw(in: CGRect(x: 18, y: (72 - 22) / 2, width: 160, height: 24), withAttributes: mainAttrs)
             
-            let textX = badgeRect.maxX + 12
-            
-            if isCompactMode {
-                let mainAttrs: [NSAttributedString.Key: Any] = [
-                    .font: UIFont.systemFont(ofSize: 19, weight: .bold),
-                    .foregroundColor: UIColor.white
-                ]
-                let rightAttrs: [NSAttributedString.Key: Any] = [
-                    .font: UIFont.monospacedDigitSystemFont(ofSize: 18, weight: .bold),
-                    .foregroundColor: accent
-                ]
-                
-                let leftText = textForMetric(leftMetric)
-                (leftText as NSString).draw(in: CGRect(x: textX, y: (baseH - 26) / 2, width: 180, height: 28), withAttributes: mainAttrs)
-                
-                let rightText = textForMetric(rightMetric)
-                (rightText as NSString).draw(in: CGRect(x: baseW - 165, y: (baseH - 24) / 2, width: 150, height: 26), withAttributes: rightAttrs)
-            } else {
-                let titleAttrs: [NSAttributedString.Key: Any] = [
-                    .font: UIFont.systemFont(ofSize: 20, weight: .bold),
-                    .foregroundColor: UIColor.white
-                ]
-                let subAttrs: [NSAttributedString.Key: Any] = [
-                    .font: UIFont.systemFont(ofSize: 15, weight: .medium),
-                    .foregroundColor: UIColor.systemGray
-                ]
-                let rightTopAttrs: [NSAttributedString.Key: Any] = [
-                    .font: UIFont.monospacedDigitSystemFont(ofSize: 17, weight: .bold),
-                    .foregroundColor: accent
-                ]
-                let rightBotAttrs: [NSAttributedString.Key: Any] = [
-                    .font: UIFont.monospacedDigitSystemFont(ofSize: 16, weight: .semibold),
-                    .foregroundColor: UIColor.systemOrange
-                ]
-                
-                let leftTop = textForMetric(leftMetric)
-                let leftBot = isPlayingMusic ? currentArtist : "Live Island Active"
-                
-                (leftTop as NSString).draw(in: CGRect(x: textX, y: 20, width: 220, height: 26), withAttributes: titleAttrs)
-                (leftBot as NSString).draw(in: CGRect(x: textX, y: 50, width: 220, height: 22), withAttributes: subAttrs)
-                
-                let rightTop = textForMetric(rightMetric)
-                rightTop.draw(in: CGRect(x: baseW - 145, y: 21, width: 130, height: 24), withAttributes: rightTopAttrs)
-                
-                let rightBot = "👟 \(stepCount)"
-                rightBot.draw(in: CGRect(x: baseW - 145, y: 50, width: 130, height: 24), withAttributes: rightBotAttrs)
-            }
+            let rightText = textForMetric(rightMetric)
+            (rightText as NSString).draw(in: CGRect(x: 195, y: (72 - 22) / 2, width: 150, height: 24), withAttributes: rightAttrs)
         }
         
         if let sampleBuffer = image.toCMSampleBuffer() {
