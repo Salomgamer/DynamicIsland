@@ -1,19 +1,29 @@
 import SwiftUI
 import AVKit
+import AVFoundation
+
+class SampleBufferUIView: UIView {
+    override class var layerClass: AnyClass {
+        return AVSampleBufferDisplayLayer.self
+    }
+    var sampleBufferLayer: AVSampleBufferDisplayLayer {
+        return layer as! AVSampleBufferDisplayLayer
+    }
+}
 
 struct PiPLayerView: UIViewRepresentable {
-    let layer: AVSampleBufferDisplayLayer
+    @ObservedObject var manager: IslandManager
     
-    func makeUIView(context: Context) -> UIView {
-        let view = UIView()
-        layer.frame = CGRect(x: 0, y: 0, width: 330, height: 60)
-        view.layer.addSublayer(layer)
+    func makeUIView(context: Context) -> SampleBufferUIView {
+        let view = SampleBufferUIView()
+        view.backgroundColor = .black
+        DispatchQueue.main.async {
+            manager.attachDisplayLayer(view.sampleBufferLayer)
+        }
         return view
     }
     
-    func updateUIView(_ uiView: UIView, context: Context) {
-        layer.frame = uiView.bounds
-    }
+    func updateUIView(_ uiView: SampleBufferUIView, context: Context) {}
 }
 
 struct ContentView: View {
@@ -106,7 +116,7 @@ struct ContentView: View {
                             .foregroundColor(.green)
                     }
                     
-                    PiPLayerView(layer: manager.sampleBufferDisplayLayer)
+                    PiPLayerView(manager: manager)
                         .frame(width: 330, height: 60)
                         .clipShape(Capsule())
                         .overlay(Capsule().stroke(Color.green.opacity(0.5), lineWidth: 1))
@@ -121,7 +131,7 @@ struct ContentView: View {
                     Button(action: { manager.togglePiP() }) {
                         HStack {
                             Image(systemName: manager.isPiPActive ? "pip.exit" : "pip.enter")
-                            Text(manager.isPiPActive ? "Hide Floating Island" : "Activate Floating Island Now")
+                            Text(manager.isPiPActive ? "Hide Floating Island" : "Pop Out Floating Island Now")
                                 .fontWeight(.bold)
                         }
                         .frame(maxWidth: .infinity)
@@ -178,7 +188,7 @@ struct ContentView: View {
                 
                 Spacer()
                 
-                Text("Swipe up to your Home Screen or open any app—the black Dynamic Island pill pops out automatically and updates live in the background!")
+                Text("Tap 'Pop Out Floating Island Now' or simply swipe up to your Home Screen—the black Dynamic Island pill pops out and updates live in the background!")
                     .font(.caption2)
                     .foregroundColor(.gray)
                     .multilineTextAlignment(.center)
