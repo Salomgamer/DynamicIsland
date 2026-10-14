@@ -13,6 +13,8 @@ class IslandManager: NSObject, ObservableObject, AVPictureInPictureControllerDel
     @Published var isPlayingMusic: Bool = false
     
     @Published var stepCount: Int = 0
+    @Published var batteryLevel: Int = 100
+    @Published var isCharging: Bool = false
     @Published var stopwatchTime: TimeInterval = 0
     @Published var isStopwatchRunning: Bool = false
     @Published var isPiPActive: Bool = false
@@ -35,18 +37,32 @@ class IslandManager: NSObject, ObservableObject, AVPictureInPictureControllerDel
     private weak var displayLayer: AVSampleBufferDisplayLayer?
     private var pipController: AVPictureInPictureController?
     
+    private let timeFormatter: DateFormatter = {
+        let df = DateFormatter()
+        df.dateFormat = "h:mm:ss a"
+        return df
+    }()
+    
     override init() {
         super.init()
+        UIDevice.current.isBatteryMonitoringEnabled = true
+        updateBatteryInfo()
         setupContinuousBackgroundAudio()
         startStepTracking()
         setupNowPlayingObserver()
         startHighPriorityFrameRenderer()
     }
     
+    private func updateBatteryInfo() {
+        let level = UIDevice.current.batteryLevel
+        batteryLevel = level >= 0 ? Int(level * 100) : 100
+        let state = UIDevice.current.batteryState
+        isCharging = (state == .charging || state == .full)
+    }
+    
     private func setupContinuousBackgroundAudio() {
         do {
             let session = AVAudioSession.sharedInstance()
-            // CRITICAL FOR PIP: Mode MUST be .moviePlayback or iOS blocks out-of-app PiP!
             try session.setCategory(.playback, mode: .moviePlayback, options: [.mixWithOthers])
             try session.setActive(true)
             
@@ -64,9 +80,8 @@ class IslandManager: NSObject, ObservableObject, AVPictureInPictureControllerDel
     func attachDisplayLayer(_ layer: AVSampleBufferDisplayLayer) {
         guard self.displayLayer !== layer else { return }
         self.displayLayer = layer
-        layer.videoGravity = .resizeAspect
+        layer.videoGravity = .resizeAspectFill
         
-        // CRITICAL FOR PIP: AVSampleBufferDisplayLayer requires an active running CMTimebase
         var timebase: CMTimebase?
         CMTimebaseCreateWithSourceClock(
             allocator: nil,
@@ -91,6 +106,7 @@ class IslandManager: NSObject, ObservableObject, AVPictureInPictureControllerDel
         if #available(iOS 14.2, *) {
             pip.canStartPictureInPictureAutomaticallyFromInline = autoPopOutOnExit
         }
+        pip.requiresLinearPlayback = false
         self.pipController = pip
         
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { [weak self] in
@@ -177,8 +193,8 @@ class IslandManager: NSObject, ObservableObject, AVPictureInPictureControllerDel
                 self.currentTrack = item.title ?? "Unknown Track"
                 self.currentArtist = item.artist ?? "Unknown Artist"
                 self.isPlayingMusic = (player.playbackState == .playing)
-            } else {
-                self.isPlayingMusic = (player.playbackState == .playing)
+            } else if self.currentTrack == "No Media Playing" {
+                self.isPlayingMusic = false
             }
         }
     }
@@ -229,6 +245,7 @@ class IslandManager: NSObject, ObservableObject, AVPictureInPictureControllerDel
             if self.isStopwatchRunning, let start = self.stopwatchStartDate {
                 self.stopwatchTime = self.accumulatedStopwatchTime + Date().timeIntervalSince(start)
             }
+            self.updateBatteryInfo()
             self.pushIslandFrame()
         }
         timer.resume()
@@ -238,26 +255,35 @@ class IslandManager: NSObject, ObservableObject, AVPictureInPictureControllerDel
     private func pushIslandFrame() {
         guard let layer = displayLayer else { return }
         let size = CGSize(width: 660, height: 120)
-        let renderer = UIGraphicsImageRenderer(size: size)
+        let format = UIGraphicsImageRendererFormat()
+        format.scale = 1.0
+        format.opaque = true
+        let renderer = UIGraphicsImageRenderer(size: size, format: format)
         
         let image = renderer.image { ctx in
             let rect = CGRect(origin: .zero, size: size)
             
+            // Background
+            UIColor(red: 0.05, green: 0.05, blue: 0.07, alpha: 1.0).setFill()
+            ctx.fill(rect)
+            
+            // Pill border
+            let pillRect = rect.insetBy(dx: 4, dy: 4)
+            let path = UIBezierPath(roundedRect: pillRect, cornerRadius: 56)
             UIColor.black.setFill()
-            let path = UIBezierPath(roundedRect: rect, cornerRadius: 60)
             path.fill()
             
-            UIColor(white: 0.25, alpha: 1.0).setStroke()
-            path.lineWidth = 3
+            UIColor.systemGreen.withAlphaComponent(0.7).setStroke()
+            path.lineWidth = 3.5
             path.stroke()
             
             let titleAttrs: [NSAttributedString.Key: Any] = [
-                .font: UIFont.systemFont(ofSize: 23, weight: .bold),
+                .font: UIFont.systemFont(ofSize: 24, weight: .bold),
                 .foregroundColor: UIColor.white
             ]
             let subAttrs: [NSAttributedString.Key: Any] = [
-                .font: UIFont.systemFont(ofSize: 17, weight: .medium),
-                .foregroundColor: UIColor.systemGray
+                .font: UIFont.systemFont(ofSize: 18, weight: .semibold),
+                .foregroundColor: UIColor.systemTeal
             ]
             let stepAttrs: [NSAttributedString.Key: Any] = [
                 .font: UIFont.monospacedDigitSystemFont(ofSize: 22, weight: .bold),
@@ -268,18 +294,27 @@ class IslandManager: NSObject, ObservableObject, AVPictureInPictureControllerDel
                 .foregroundColor: UIColor.systemOrange
             ]
             
-            let musicIcon = isPlayingMusic ? "🎵 " : "⏸️ "
-            let trackText = (musicIcon + currentTrack) as NSString
-            trackText.draw(in: CGRect(x: 32, y: 24, width: 340, height: 32), withAttributes: titleAttrs)
+            // Left side: Media or Live Clock + Battery
+            let topLeftText: String
+            let bottomLeftText: String
+            if isPlayingMusic || currentTrack != "No Media Playing" {
+                topLeftText = (isPlayingMusic ? "🎵 " : "⏸️ ") + currentTrack
+                bottomLeftText = currentArtist
+            } else {
+                topLeftText = "🕒 " + timeFormatter.string(from: Date())
+                let bolt = isCharging ? "⚡" : "🔋"
+                bottomLeftText = "\(bolt) Battery: \(batteryLevel)%  •  Active"
+            }
             
-            let artistText = currentArtist as NSString
-            artistText.draw(in: CGRect(x: 32, y: 60, width: 340, height: 26), withAttributes: subAttrs)
+            (topLeftText as NSString).draw(in: CGRect(x: 34, y: 22, width: 350, height: 34), withAttributes: titleAttrs)
+            (bottomLeftText as NSString).draw(in: CGRect(x: 34, y: 62, width: 350, height: 28), withAttributes: subAttrs)
             
-            let stepsString = "👟 \(stepCount)" as NSString
-            stepsString.draw(in: CGRect(x: 410, y: 24, width: 220, height: 32), withAttributes: stepAttrs)
+            // Right side: Live Steps & Stopwatch
+            let stepsString = "👟 \(stepCount) steps" as NSString
+            stepsString.draw(in: CGRect(x: 400, y: 22, width: 230, height: 32), withAttributes: stepAttrs)
             
             let swString = "⏱️ \(formattedStopwatch())" as NSString
-            swString.draw(in: CGRect(x: 410, y: 60, width: 220, height: 32), withAttributes: timerAttrs)
+            swString.draw(in: CGRect(x: 400, y: 62, width: 230, height: 32), withAttributes: timerAttrs)
         }
         
         if let sampleBuffer = image.toCMSampleBuffer() {
@@ -329,24 +364,29 @@ extension UIImage {
         let height = cgImage.height
         
         var pixelBuffer: CVPixelBuffer?
-        let attrs = [
-            kCVPixelBufferCGImageCompatibilityKey: kCFBooleanTrue,
-            kCVPixelBufferCGBitmapContextCompatibilityKey: kCFBooleanTrue
-        ] as CFDictionary
+        // CRITICAL FOR IOS GPU / PIP: Must include kCVPixelBufferIOSurfacePropertiesKey and use 32BGRA
+        let attrs: [CFString: Any] = [
+            kCVPixelBufferCGImageCompatibilityKey: true,
+            kCVPixelBufferCGBitmapContextCompatibilityKey: true,
+            kCVPixelBufferIOSurfacePropertiesKey: [:] as CFDictionary
+        ]
         
         let status = CVPixelBufferCreate(
             nil,
             width,
             height,
-            kCVPixelFormatType_32ARGB,
-            attrs,
+            kCVPixelFormatType_32BGRA,
+            attrs as CFDictionary,
             &pixelBuffer
         )
         guard status == kCVReturnSuccess, let buffer = pixelBuffer else { return nil }
         
         CVPixelBufferLockBaseAddress(buffer, [])
+        defer { CVPixelBufferUnlockBaseAddress(buffer, []) }
+        
         let pixelData = CVPixelBufferGetBaseAddress(buffer)
         let rgbColorSpace = CGColorSpaceCreateDeviceRGB()
+        let bitmapInfo = CGBitmapInfo.byteOrder32Little.rawValue | CGImageAlphaInfo.premultipliedFirst.rawValue
         
         guard let context = CGContext(
             data: pixelData,
@@ -355,14 +395,12 @@ extension UIImage {
             bitsPerComponent: 8,
             bytesPerRow: CVPixelBufferGetBytesPerRow(buffer),
             space: rgbColorSpace,
-            bitmapInfo: CGImageAlphaInfo.noneSkipFirst.rawValue
+            bitmapInfo: bitmapInfo
         ) else {
-            CVPixelBufferUnlockBaseAddress(buffer, [])
             return nil
         }
         
         context.draw(cgImage, in: CGRect(x: 0, y: 0, width: width, height: height))
-        CVPixelBufferUnlockBaseAddress(buffer, [])
         
         var formatDescription: CMFormatDescription?
         CMVideoFormatDescriptionCreateForImageBuffer(
