@@ -7,9 +7,19 @@ import CoreMotion
 import MediaPlayer
 import Combine
 
+enum IslandMetric: String, CaseIterable, Identifiable {
+    case clock = "Clock"
+    case steps = "Step Count"
+    case battery = "Battery Level"
+    case stopwatch = "Stopwatch Timer"
+    case media = "Now Playing"
+    
+    var id: String { self.rawValue }
+}
+
 class IslandManager: NSObject, ObservableObject, AVPictureInPictureControllerDelegate {
     @Published var currentTrack: String = "No Media Playing"
-    @Published var currentArtist: String = "Play music to expand"
+    @Published var currentArtist: String = "Idle • Ready"
     @Published var isPlayingMusic: Bool = false
     
     @Published var stepCount: Int = 0
@@ -18,6 +28,19 @@ class IslandManager: NSObject, ObservableObject, AVPictureInPictureControllerDel
     @Published var stopwatchTime: TimeInterval = 0
     @Published var isStopwatchRunning: Bool = false
     @Published var isPiPActive: Bool = false
+    
+    // Customizable Metrics (User Choice)
+    @Published var leftMetric: IslandMetric = .media
+    @Published var rightMetric: IslandMetric = .stopwatch
+    
+    // Notch Customization Sliders
+    @Published var pillWidth: CGFloat = 210
+    @Published var pillHeight: CGFloat = 36
+    @Published var topOffset: CGFloat = 0
+    @Published var pipScale: CGFloat = 1.0
+    @Published var isCompactMode: Bool = true
+    @Published var accentColorIndex: Int = 0 // 0: Green, 1: Purple, 2: Orange, 3: Cyan
+    
     @Published var autoPopOutOnExit: Bool = true {
         didSet {
             if #available(iOS 14.2, *) {
@@ -36,18 +59,38 @@ class IslandManager: NSObject, ObservableObject, AVPictureInPictureControllerDel
     
     private weak var displayLayer: AVSampleBufferDisplayLayer?
     private var pipController: AVPictureInPictureController?
+    private var wasInterruptedByOtherPiP: Bool = false
     
     private let timeFormatter: DateFormatter = {
         let df = DateFormatter()
-        df.dateFormat = "h:mm:ss a"
+        df.dateFormat = "h:mm a"
         return df
     }()
+    
+    var currentUIColor: UIColor {
+        switch accentColorIndex {
+        case 1: return UIColor.systemPurple
+        case 2: return UIColor.systemOrange
+        case 3: return UIColor.systemCyan
+        default: return UIColor.systemGreen
+        }
+    }
+    
+    var currentSwiftUIColor: Color {
+        switch accentColorIndex {
+        case 1: return .purple
+        case 2: return .orange
+        case 3: return .cyan
+        default: return .green
+        }
+    }
     
     override init() {
         super.init()
         UIDevice.current.isBatteryMonitoringEnabled = true
         updateBatteryInfo()
         setupContinuousBackgroundAudio()
+        setupAudioInterruptionObserver()
         startStepTracking()
         setupNowPlayingObserver()
         startHighPriorityFrameRenderer()
@@ -75,6 +118,33 @@ class IslandManager: NSObject, ObservableObject, AVPictureInPictureControllerDel
         } catch {
             print("Background Audio Error: \(error)")
         }
+    }
+    
+    private func setupAudioInterruptionObserver() {
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(handleAudioInterruption),
+            name: AVAudioSession.interruptionNotification,
+            object: AVAudioSession.sharedInstance()
+        )
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(handleAppDidBecomeActive),
+            name: UIApplication.didBecomeActiveNotification,
+            object: nil
+        )
+    }
+    
+    @objc private func handleAudioInterruption(_ notification: Notification) {
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
+            self?.ensureBackgroundExecution()
+        }
+    }
+    
+    @objc private func handleAppDidBecomeActive() {
+        ensureBackgroundExecution()
+        pushIslandFrame()
+        pipController?.invalidatePlaybackState()
     }
     
     func attachDisplayLayer(_ layer: AVSampleBufferDisplayLayer) {
@@ -117,6 +187,7 @@ class IslandManager: NSObject, ObservableObject, AVPictureInPictureControllerDel
     
     func ensureBackgroundExecution() {
         do {
+            try AVAudioSession.sharedInstance().setCategory(.playback, mode: .moviePlayback, options: [.mixWithOthers])
             try AVAudioSession.sharedInstance().setActive(true)
         } catch {}
         
@@ -237,16 +308,37 @@ class IslandManager: NSObject, ObservableObject, AVPictureInPictureControllerDel
         }
     }
     
+    func textForMetric(_ metric: IslandMetric) -> String {
+        switch metric {
+        case .clock: return timeFormatter.string(from: Date())
+        case .steps: return "👟 \(stepCount)"
+        case .battery: return "\(isCharging ? "⚡" : "🔋") \(batteryLevel)%"
+        case .stopwatch: return "⏱️ \(formattedStopwatch())"
+        case .media: return isPlayingMusic ? currentTrack : "No Media"
+        }
+    }
+    
     func startHighPriorityFrameRenderer() {
         let timer = DispatchSource.makeTimerSource(queue: DispatchQueue.main)
-        timer.schedule(deadline: .now(), repeating: .milliseconds(200))
+        timer.schedule(deadline: .now(), repeating: .milliseconds(250))
         timer.setEventHandler { [weak self] in
             guard let self = self else { return }
             if self.isStopwatchRunning, let start = self.stopwatchStartDate {
                 self.stopwatchTime = self.accumulatedStopwatchTime + Date().timeIntervalSince(start)
             }
+            if self.silentAudioPlayer?.isPlaying == false {
+                self.silentAudioPlayer?.play()
+            }
             self.updateBatteryInfo()
             self.pushIslandFrame()
+            
+            if self.wasInterruptedByOtherPiP,
+               UIApplication.shared.applicationState != .active,
+               let pip = self.pipController,
+               !pip.isPictureInPictureActive,
+               pip.isPictureInPicturePossible {
+                pip.startPictureInPicture()
+            }
         }
         timer.resume()
         renderSourceTimer = timer
@@ -254,67 +346,92 @@ class IslandManager: NSObject, ObservableObject, AVPictureInPictureControllerDel
     
     private func pushIslandFrame() {
         guard let layer = displayLayer else { return }
-        let size = CGSize(width: 660, height: 120)
+        
+        let baseW: CGFloat = isCompactMode ? 420 : 520
+        let baseH: CGFloat = isCompactMode ? 80 : 96
+        let size = CGSize(width: baseW, height: baseH)
+        
         let format = UIGraphicsImageRendererFormat()
         format.scale = 1.0
         format.opaque = true
         let renderer = UIGraphicsImageRenderer(size: size, format: format)
         
+        let accent = currentUIColor
+        
         let image = renderer.image { ctx in
             let rect = CGRect(origin: .zero, size: size)
             
-            // Background
-            UIColor(red: 0.05, green: 0.05, blue: 0.07, alpha: 1.0).setFill()
+            UIColor.black.setFill()
             ctx.fill(rect)
             
-            // Pill border
-            let pillRect = rect.insetBy(dx: 4, dy: 4)
-            let path = UIBezierPath(roundedRect: pillRect, cornerRadius: 56)
-            UIColor.black.setFill()
+            let pad: CGFloat = 3
+            let pillRect = rect.insetBy(dx: pad, dy: pad)
+            let path = UIBezierPath(roundedRect: pillRect, cornerRadius: (baseH - pad * 2) / 2)
+            
+            UIColor(white: 0.04, alpha: 1.0).setFill()
             path.fill()
             
-            UIColor.systemGreen.withAlphaComponent(0.7).setStroke()
-            path.lineWidth = 3.5
+            accent.withAlphaComponent(0.45).setStroke()
+            path.lineWidth = 2.0
             path.stroke()
             
-            let titleAttrs: [NSAttributedString.Key: Any] = [
-                .font: UIFont.systemFont(ofSize: 24, weight: .bold),
-                .foregroundColor: UIColor.white
-            ]
-            let subAttrs: [NSAttributedString.Key: Any] = [
-                .font: UIFont.systemFont(ofSize: 18, weight: .semibold),
-                .foregroundColor: UIColor.systemTeal
-            ]
-            let stepAttrs: [NSAttributedString.Key: Any] = [
-                .font: UIFont.monospacedDigitSystemFont(ofSize: 22, weight: .bold),
-                .foregroundColor: UIColor.systemGreen
-            ]
-            let timerAttrs: [NSAttributedString.Key: Any] = [
-                .font: UIFont.monospacedDigitSystemFont(ofSize: 22, weight: .bold),
-                .foregroundColor: UIColor.systemOrange
-            ]
+            let badgeSize: CGFloat = baseH - 28
+            let badgeRect = CGRect(x: 16, y: (baseH - badgeSize) / 2, width: badgeSize, height: badgeSize)
+            let badgePath = UIBezierPath(ovalIn: badgeRect)
+            accent.withAlphaComponent(0.2).setFill()
+            badgePath.fill()
             
-            // Left side: Media or Live Clock + Battery
-            let topLeftText: String
-            let bottomLeftText: String
-            if isPlayingMusic || currentTrack != "No Media Playing" {
-                topLeftText = (isPlayingMusic ? "🎵 " : "⏸️ ") + currentTrack
-                bottomLeftText = currentArtist
+            let iconStr = (isPlayingMusic ? "🎵" : "✨") as NSString
+            let iconFont = UIFont.systemFont(ofSize: badgeSize * 0.5)
+            iconStr.draw(in: CGRect(x: badgeRect.minX + badgeSize * 0.22, y: badgeRect.minY + badgeSize * 0.18, width: badgeSize, height: badgeSize), withAttributes: [.font: iconFont])
+            
+            let textX = badgeRect.maxX + 12
+            
+            if isCompactMode {
+                let mainAttrs: [NSAttributedString.Key: Any] = [
+                    .font: UIFont.systemFont(ofSize: 19, weight: .bold),
+                    .foregroundColor: UIColor.white
+                ]
+                let rightAttrs: [NSAttributedString.Key: Any] = [
+                    .font: UIFont.monospacedDigitSystemFont(ofSize: 18, weight: .bold),
+                    .foregroundColor: accent
+                ]
+                
+                let leftText = textForMetric(leftMetric)
+                (leftText as NSString).draw(in: CGRect(x: textX, y: (baseH - 26) / 2, width: 180, height: 28), withAttributes: mainAttrs)
+                
+                let rightText = textForMetric(rightMetric)
+                (rightText as NSString).draw(in: CGRect(x: baseW - 165, y: (baseH - 24) / 2, width: 150, height: 26), withAttributes: rightAttrs)
             } else {
-                topLeftText = "🕒 " + timeFormatter.string(from: Date())
-                let bolt = isCharging ? "⚡" : "🔋"
-                bottomLeftText = "\(bolt) Battery: \(batteryLevel)%  •  Active"
+                let titleAttrs: [NSAttributedString.Key: Any] = [
+                    .font: UIFont.systemFont(ofSize: 20, weight: .bold),
+                    .foregroundColor: UIColor.white
+                ]
+                let subAttrs: [NSAttributedString.Key: Any] = [
+                    .font: UIFont.systemFont(ofSize: 15, weight: .medium),
+                    .foregroundColor: UIColor.systemGray
+                ]
+                let rightTopAttrs: [NSAttributedString.Key: Any] = [
+                    .font: UIFont.monospacedDigitSystemFont(ofSize: 17, weight: .bold),
+                    .foregroundColor: accent
+                ]
+                let rightBotAttrs: [NSAttributedString.Key: Any] = [
+                    .font: UIFont.monospacedDigitSystemFont(ofSize: 16, weight: .semibold),
+                    .foregroundColor: UIColor.systemOrange
+                ]
+                
+                let leftTop = textForMetric(leftMetric)
+                let leftBot = isPlayingMusic ? currentArtist : "Live Island Active"
+                
+                (leftTop as NSString).draw(in: CGRect(x: textX, y: 20, width: 220, height: 26), withAttributes: titleAttrs)
+                (leftBot as NSString).draw(in: CGRect(x: textX, y: 50, width: 220, height: 22), withAttributes: subAttrs)
+                
+                let rightTop = textForMetric(rightMetric)
+                rightTop.draw(in: CGRect(x: baseW - 145, y: 21, width: 130, height: 24), withAttributes: rightTopAttrs)
+                
+                let rightBot = "👟 \(stepCount)"
+                rightBot.draw(in: CGRect(x: baseW - 145, y: 50, width: 130, height: 24), withAttributes: rightBotAttrs)
             }
-            
-            (topLeftText as NSString).draw(in: CGRect(x: 34, y: 22, width: 350, height: 34), withAttributes: titleAttrs)
-            (bottomLeftText as NSString).draw(in: CGRect(x: 34, y: 62, width: 350, height: 28), withAttributes: subAttrs)
-            
-            // Right side: Live Steps & Stopwatch
-            let stepsString = "👟 \(stepCount) steps" as NSString
-            stepsString.draw(in: CGRect(x: 400, y: 22, width: 230, height: 32), withAttributes: stepAttrs)
-            
-            let swString = "⏱️ \(formattedStopwatch())" as NSString
-            swString.draw(in: CGRect(x: 400, y: 62, width: 230, height: 32), withAttributes: timerAttrs)
         }
         
         if let sampleBuffer = image.toCMSampleBuffer() {
@@ -327,10 +444,15 @@ class IslandManager: NSObject, ObservableObject, AVPictureInPictureControllerDel
     
     func pictureInPictureControllerDidStartPictureInPicture(_ pictureInPictureController: AVPictureInPictureController) {
         isPiPActive = true
+        wasInterruptedByOtherPiP = false
     }
     
     func pictureInPictureControllerDidStopPictureInPicture(_ pictureInPictureController: AVPictureInPictureController) {
         isPiPActive = false
+        if UIApplication.shared.applicationState != .active {
+            wasInterruptedByOtherPiP = true
+            ensureBackgroundExecution()
+        }
     }
 }
 
@@ -364,7 +486,6 @@ extension UIImage {
         let height = cgImage.height
         
         var pixelBuffer: CVPixelBuffer?
-        // CRITICAL FOR IOS GPU / PIP: Must include kCVPixelBufferIOSurfacePropertiesKey and use 32BGRA
         let attrs: [CFString: Any] = [
             kCVPixelBufferCGImageCompatibilityKey: true,
             kCVPixelBufferCGBitmapContextCompatibilityKey: true,
