@@ -1,0 +1,33 @@
+name: DynamicIsland
+options:
+  bundleIdPrefix: com.custom
+  deploymentTarget:
+    iOS: "16.0"
+  xcodeVersion: "15.0"
+settings:
+  base:
+    PRODUCT_BUNDLE_IDENTIFIER: com.custom.dynamicisland
+    MARKETING_VERSION: "2.0.0"
+    CURRENT_PROJECT_VERSION: "2"
+    SWIFT_VERSION: "5.0"
+    CODE_SIGN_IDENTITY: ""
+    CODE_SIGNING_REQUIRED: NO
+    CODE_SIGNING_ALLOWED: NO
+targets:
+  DynamicIsland:
+    type: application
+    platform: iOS
+    sources:
+      - DynamicIslandSource
+    info:
+      path: DynamicIslandSource/Info.plist
+      properties:
+        CFBundleDisplayName: DynamicIsland
+        UILaunchScreen: {}
+        NSMotionUsageDescription: "DynamicIsland reads your live step count to display it inside the floating island."
+        NSAppleMusicUsageDescription: "DynamicIsland reads your currently playing song to display it in the island."
+        UIBackgroundModes:
+          - audio
+          - location
+          - processing
+        UIApplicationSupportsIndirectInputEvents: true
