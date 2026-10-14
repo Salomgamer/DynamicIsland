@@ -10,7 +10,7 @@ struct DynamicIslandApp: App {
             ContentView()
                 .environmentObject(manager)
                 .preferredColorScheme(.dark)
-                .onChange(of: scenePhase) { oldPhase, newPhase in
+                .onChange(of: scenePhase) { newPhase in
                     if newPhase == .inactive || newPhase == .background {
                         manager.ensureBackgroundExecution()
                     }
